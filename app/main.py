@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordRequestForm
 
 from api.channels import channel_router
+from api.messages import messages_router
 from api.users import router
 from app.auth import create_access_token, authenticate_user
 from app.config import settings
@@ -22,7 +23,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, title="Chat Application", version="0.1.2")
 app.include_router(router)
 app.include_router(channel_router)
-
+app.include_router(messages_router)
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Chat API"}

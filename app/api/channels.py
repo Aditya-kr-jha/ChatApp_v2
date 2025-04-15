@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 from app.auth import get_current_active_user
 from app.db.session import get_session
 from app.models.models import Channel, utc_now, User, Membership
-from app.schemas.schemas import ChannelCreate, ChannelRead, ChannelUpdate
+from app.schemas.schemas import ChannelCreate, ChannelRead, ChannelUpdate, UserRead
 
 channel_router = APIRouter(
     prefix="/channels",
