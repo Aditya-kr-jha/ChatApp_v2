@@ -19,7 +19,14 @@ def create_user(
     session: Session = Depends(get_session),
     user_in: UserCreate
 ):
-    # Check if username or email already exists (optional but recommended)
+    """
+    Create a new user.
+
+    This endpoint creates a new user from the provided data, after checking if
+    the username or email is already registered. The plain password is hashed,
+    and then the new user record is saved in the database.
+    """
+    # Verify if username or email already exists.
     existing_user = session.exec(
         select(User).where(
             (User.username == user_in.username) | (User.email == user_in.email)
@@ -31,11 +38,13 @@ def create_user(
             detail="Username or email already registered.",
         )
 
+    # Hash the provided password.
     hashed_password = hash_password(user_in.password)
-    # Create a dict excluding the plain password, add hashed password
+    # Remove the plain password and add the hashed password to user data.
     user_data = user_in.model_dump(exclude={"password"})
     db_user = User(**user_data, hashed_password=hashed_password)
 
+    # Persist the new user record.
     session.add(db_user)
     session.commit()
     session.refresh(db_user)
@@ -49,6 +58,12 @@ def read_users(
     limit: int = 100,
     current_user: User = Depends(get_current_active_user)
 ):
+    """
+    Retrieve a list of users.
+
+    This endpoint returns a paginated list of users from the database. The
+    current authenticated user is required for authorization.
+    """
     users = session.exec(select(User).offset(skip).limit(limit)).all()
     return users
 
@@ -59,6 +74,12 @@ def read_user(
     user_id: int,
     current_user: User = Depends(get_current_active_user)
 ):
+    """
+    Retrieve a user by ID.
+
+    This endpoint fetches the user record matching the given user_id. If the
+    user does not exist, a 404 error is returned.
+    """
     db_user = session.get(User, user_id)
     if not db_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -72,33 +93,41 @@ def update_user(
     user_in: UserUpdate,
     current_user: User = Depends(get_current_active_user)
 ):
+    """
+    Update an existing user.
+
+    This endpoint allows updating fields of the user record. It ensures that the
+    current user is authorized to update the record. If the password is updated,
+    it is automatically hashed.
+    """
     db_user = session.get(User, user_id)
     if not db_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    # Authorization: Ensure the current user is the one being updated (or an admin)
+    # Authorization check: only allow the user himself (or an admin) to update.
     if db_user.id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to update this user")
 
-    user_data = user_in.model_dump(exclude_unset=True) # Get only fields that were actually sent
+    # Retrieve only the fields provided in the request.
+    user_data = user_in.model_dump(exclude_unset=True)
 
-    # Handle password update separately
+    # Process password separately to hash it.
     if "password" in user_data and user_data["password"]:
         hashed_password = hash_password(user_data["password"])
         db_user.hashed_password = hashed_password
-        del user_data["password"] # Don't try to set it again below
+        del user_data["password"]
 
-    # Update other fields
+    # Update remaining fields.
     for key, value in user_data.items():
         setattr(db_user, key, value)
 
+    # Update modification timestamp.
     db_user.updated_at = utc_now()
 
     session.add(db_user)
     session.commit()
     session.refresh(db_user)
     return db_user
-
 
 @router.delete("/{user_id}", status_code=status.HTTP_200_OK)
 def delete_user(
@@ -107,10 +136,17 @@ def delete_user(
     user_id: int,
     current_user: User = Depends(get_current_active_user)
 ):
+    """
+    Delete a user.
+
+    This endpoint deletes the user matching user_id. Only the current user can
+    delete his own user record.
+    """
     db_user = session.get(User, user_id)
     if not db_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+    # Authorization: only the owner of the record can delete it.
     if db_user.id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this user")
 

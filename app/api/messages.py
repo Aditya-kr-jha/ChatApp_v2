@@ -1,4 +1,3 @@
-# python
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,7 +16,8 @@ messages_router = APIRouter(
 )
 
 
-@messages_router.post("/channels/{channel_id}/messages", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
+@messages_router.post("/channels/{channel_id}/messages", response_model=MessageRead,
+                      status_code=status.HTTP_201_CREATED)
 def create_message_in_channel(
         *,
         session: Session = Depends(get_session),
@@ -26,18 +26,23 @@ def create_message_in_channel(
         current_user: User = Depends(get_current_active_user)
 ):
     """
-    Creates a new message in a specific channel.
+    Create a new message in a specified channel.
 
-    - Requires the user making the request (`current_user`) to be a member
-      of the specified channel.
-    - The author of the message is automatically set to the `current_user`.
+    This endpoint creates a message provided by the client within a channel.
+    It first validates that:
+      - The channel exists.
+      - The current user is a member of the channel.
+
+    The endpoint then sets the author automatically using the current user's ID
+    and populates the channel ID from the endpoint path. The new message is then
+    added to the database and returned with a 201 status code.
     """
-    # Validate that the channel exists
+    # Validate that the channel exists.
     db_channel = session.get(Channel, channel_id)
     if not db_channel:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
 
-    # Authorization: Check if the current user is a member of the channel
+    # Check if the current user is a member of the channel.
     membership_check = session.exec(
         select(Membership).where(
             Membership.user_id == current_user.id,
@@ -45,20 +50,23 @@ def create_message_in_channel(
         )
     ).first()
     if not membership_check:
-         raise HTTPException(
-             status_code=status.HTTP_403_FORBIDDEN,
-             detail="Not authorized to post messages in this channel."
-         )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to post messages in this channel."
+        )
 
-    # Create the message instance, setting author_id from current_user
+    # Create and validate the message instance, setting:
+    # - channel_id from the endpoint.
+    # - author_id from the current user.
     db_message = Message.model_validate(
         message_in,
         update={
             "channel_id": channel_id,
-            "author_id": current_user.id # Set author automatically
+            "author_id": current_user.id
         }
     )
 
+    # Save the new message to the database.
     session.add(db_message)
     session.commit()
     session.refresh(db_message)
@@ -73,9 +81,10 @@ def read_message(
         current_user: User = Depends(get_current_active_user)
 ):
     """
-    Retrieve a message by its ID.
+    Retrieve a message by its unique identifier.
 
-    Returns the requested message; raises an HTTP error if not found.
+    This endpoint fetches a message based on the provided message_id.
+    If no message is found in the database, it responds with a 404 error.
     """
     db_message = session.get(Message, message_id)
     if not db_message:
@@ -94,23 +103,28 @@ def update_message(
     """
     Update an existing message.
 
-    Validates that the message exists and that the current user is the author.
-    Only updates fields provided in the request.
+    This endpoint allows the author of a message to perform a partial update.
+    It validates that:
+      - The message exists.
+      - The current user is the author of the message.
+
+    Only the fields provided in the request are updated and the modification
+    timestamp is updated.
     """
     db_message = session.get(Message, message_id)
     if not db_message:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
-    # Check if the message belongs to the current user.
+    # Ensure the current user is the author of the message.
     if db_message.author_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to update this message")
 
-    # Update only the provided fields.
+    # Perform a partial update only on provided fields.
     message_data = message_in.model_dump(exclude_unset=True)
     for key, value in message_data.items():
         setattr(db_message, key, value)
 
-    # Update the modification timestamp.
+    # Update the last-modified timestamp.
     db_message.updated_at = utc_now()
     session.add(db_message)
     session.commit()
@@ -126,18 +140,21 @@ def delete_message(
         current_user: User = Depends(get_current_active_user)
 ):
     """
-    Delete a message by its ID.
+    Delete a message by its unique identifier.
 
-    Only the author of the message can delete it.
+    Only the message author is allowed to delete the message.
+    If the message does not exist or the current user is not the author,
+    an appropriate HTTP error is returned.
     """
     db_message = session.get(Message, message_id)
     if not db_message:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
-    # Ensure the current user is authorized to delete the message.
+    # Check authorization: the current user must own the message.
     if db_message.author_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this message")
 
+    # Delete the message from the database.
     session.delete(db_message)
     session.commit()
     return {"message": "Message deleted successfully"}
@@ -147,25 +164,28 @@ def delete_message(
 def read_all_messages_of_user(
         *,
         session: Session = Depends(get_session),
-        user_id: int,  # The author whose messages we want.
+        user_id: int,  # The author whose messages are being queried.
         skip: int = 0,
         limit: int = 100,
-        current_user: User = Depends(get_current_active_user)  # The user making the request.
+        current_user: User = Depends(get_current_active_user)
 ):
     """
-    Retrieve messages authored by 'user_id' that are posted in channels
-    where the current user is a member.
+    Retrieve messages posted by a specific user.
 
-    Uses a SQL join with the Membership table to enforce membership restrictions.
+    This endpoint returns messages that are authored by 'user_id' and belong
+    to channels in which the current user has membership. It uses a join
+    operation between messages and memberships to enforce this restriction.
+
+    Pagination is supported through 'skip' and 'limit' parameters.
     """
     statement = (
         select(Message)
         .join(Membership, Message.channel_id == Membership.channel_id)
-        .where(Message.author_id == user_id)  # Filter by the desired author.
-        .where(Membership.user_id == current_user.id)  # Ensure the current user is a member.
-        .order_by(Message.created_at.desc())  # Order messages by creation date.
-        .offset(skip)  # Skip a number of results for pagination.
-        .limit(limit)  # Limit the number of results for pagination.
+        .where(Message.author_id == user_id)  # Ensure messages are from the desired author.
+        .where(Membership.user_id == current_user.id)  # Confirm current user is a member of the channel.
+        .order_by(Message.created_at.desc())  # Order messages by creation date descending.
+        .offset(skip)  # Support pagination by skipping records.
+        .limit(limit)  # Limit the number of records returned.
     )
     messages = session.exec(statement).all()
     return messages
@@ -175,19 +195,20 @@ def read_all_messages_of_user(
 def read_all_messages_of_user_in_channel(
         *,
         session: Session = Depends(get_session),
-        channel_id: int,  # The specific channel to filter messages.
-        user_id: int,  # The author whose messages we want.
+        channel_id: int,  # The channel to filter messages.
+        user_id: int,  # The author whose messages are queried.
         skip: int = 0,
         limit: int = 100,
-        current_user: User = Depends(get_current_active_user)  # The user making the request.
+        current_user: User = Depends(get_current_active_user)
 ):
     """
-    Retrieve messages authored by 'user_id' in a specific channel.
+    Retrieve messages by a specific user within a given channel.
 
-    First validates that the current user is a member of the requested channel,
-    then retrieves the messages if authorized.
+    This endpoint first checks that the current user is a member of the specified
+    channel and then returns messages authored by 'user_id' within the channel,
+    applying pagination as needed.
     """
-    # Perform an authorization check using Membership table.
+    # Verify that the current user is a member of the channel.
     membership_check = session.exec(
         select(Membership).where(
             Membership.user_id == current_user.id,
@@ -200,7 +221,7 @@ def read_all_messages_of_user_in_channel(
             detail="Not authorized to view messages in this channel."
         )
 
-    # Query for messages in the specific channel.
+    # Retrieve messages in the channel from the specified author.
     statement = (
         select(Message)
         .where(Message.author_id == user_id)
@@ -212,50 +233,44 @@ def read_all_messages_of_user_in_channel(
     messages = session.exec(statement).all()
     return messages
 
+
 @messages_router.get("/channel/{channel_id}", response_model=List[MessageRead])
 def read_messages_in_channel(
-    *,
-    session: Session = Depends(get_session),
-    channel_id: int, # The channel whose messages we want
-    skip: int = 0,
-    limit: int = 100,
-    current_user: User = Depends(get_current_active_user) # The user making the request
+        *,
+        session: Session = Depends(get_session),
+        channel_id: int,  # The channel from which to retrieve messages.
+        skip: int = 0,
+        limit: int = 100,
+        current_user: User = Depends(get_current_active_user)
 ):
     """
-    Retrieves all messages within a specific channel, ordered by creation date.
+    Retrieve all messages in a specific channel.
 
-    Requires the user making the request (`current_user`) to be a member
-    of the specified channel.
+    This endpoint lists all messages within a channel, ordering them by creation date.
+    It enforces that the current user is a member of the channel through an authorization check.
+
+    Pagination is supported through 'skip' and 'limit' parameters.
     """
-    # --- Authorization Check ---
-    # Efficiently check if the current user is a member of the requested channel.
-    # This query is fast as it directly checks the link table.
+    # Authorization Check: Verify current user membership.
     membership_check = session.exec(
         select(Membership).where(
             Membership.user_id == current_user.id,
             Membership.channel_id == channel_id
         )
     ).first()
-
-    # If no membership record is found, the user is not authorized.
     if not membership_check:
-         raise HTTPException(
-             status_code=status.HTTP_403_FORBIDDEN, # Use 403 Forbidden for authorization errors
-             detail="Not authorized to view messages in this channel."
-         )
-    # --- End Authorization Check ---
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to view messages in this channel."
+        )
 
-    # If authorized, proceed to query the messages for the specified channel
+    # Retrieve messages for the channel with pagination.
     statement = (
         select(Message)
-        .where(Message.channel_id == channel_id) # Filter messages by the channel_id
-        .order_by(Message.created_at.desc()) # Order by most recent first (descending)
-        .offset(skip) # Apply pagination offset
-        .limit(limit) # Apply pagination limit
+        .where(Message.channel_id == channel_id)
+        .order_by(Message.created_at.desc())
+        .offset(skip)
+        .limit(limit)
     )
-
-    # Execute the query and retrieve all matching messages
     messages = session.exec(statement).all()
-
-    # Return the list of messages (will be empty if the channel has no messages)
     return messages
