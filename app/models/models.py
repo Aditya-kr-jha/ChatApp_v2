@@ -2,13 +2,26 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from sqlmodel import Field, SQLModel, Relationship, select
 
-from app.enum.enums import UserStatus
+from models_enums.enums import UserStatus
 
-
-# Helper function to get UTC timestamp
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
+class Membership(SQLModel, table=True):
+    __tablename__ = "memberships"
+
+    user_id: int = Field(foreign_key="users.id", primary_key=True)
+    channel_id: int = Field(foreign_key="channels.id", primary_key=True)
+    joined_at: datetime = Field(default_factory=utc_now)
+
+    user: "User" = Relationship(
+        back_populates="memberships",
+        sa_relationship_kwargs={"overlaps": "channels,members"}
+    )
+    channel: "Channel" = Relationship(
+        back_populates="memberships",
+        sa_relationship_kwargs={"overlaps": "members,channels"}
+    )
 
 class User(SQLModel, table=True):
     __tablename__ = "users"
@@ -25,16 +38,17 @@ class User(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now)
     status: UserStatus = Field(default=UserStatus.active)
 
-    # Relationships
     messages: List["Message"] = Relationship(back_populates="author")
     owned_channels: List["Channel"] = Relationship(back_populates="owner")
     memberships: List["Membership"] = Relationship(back_populates="user")
     channels: List["Channel"] = Relationship(
         back_populates="members",
-        link_model="Membership",
-        sa_relationship_kwargs={"secondary": "memberships"}
+        link_model=Membership,
+        sa_relationship_kwargs={
+            "secondary": "memberships",
+            "overlaps": "memberships,user"
+        }
     )
-
 
 class Channel(SQLModel, table=True):
     __tablename__ = "channels"
@@ -46,16 +60,20 @@ class Channel(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
-    # Relationships
-    owner: Optional[User] = Relationship(back_populates="owned_channels")
+    owner: Optional["User"] = Relationship(back_populates="owned_channels")
     messages: List["Message"] = Relationship(back_populates="channel")
-    memberships: List["Membership"] = Relationship(back_populates="channel")
-    members: List[User] = Relationship(
-        back_populates="channels",
-        link_model="Membership",
-        sa_relationship_kwargs={"secondary": "memberships"}
+    memberships: List["Membership"] = Relationship(
+        back_populates="channel",
+        sa_relationship_kwargs={"overlaps": "channels"}
     )
-
+    members: List["User"] = Relationship(
+        back_populates="channels",
+        link_model=Membership,
+        sa_relationship_kwargs={
+            "secondary": "memberships",
+            "overlaps": "channel,memberships,user"
+        }
+    )
 
 class Message(SQLModel, table=True):
     __tablename__ = "messages"
@@ -67,22 +85,8 @@ class Message(SQLModel, table=True):
     author_id: Optional[int] = Field(default=None, foreign_key="users.id")
     channel_id: Optional[int] = Field(default=None, foreign_key="channels.id")
 
-    # Relationships
-    author: Optional[User] = Relationship(back_populates="messages")
-    channel: Optional[Channel] = Relationship(back_populates="messages")
-
-
-class Membership(SQLModel, table=True):
-    __tablename__ = "memberships"
-
-    user_id: int = Field(foreign_key="users.id", primary_key=True)
-    channel_id: int = Field(foreign_key="channels.id", primary_key=True)
-    joined_at: datetime = Field(default_factory=utc_now)
-
-    # Relationships
-    user: User = Relationship(back_populates="memberships")
-    channel: Channel = Relationship(back_populates="memberships")
-
+    author: Optional["User"] = Relationship(back_populates="messages")
+    channel: Optional["Channel"] = Relationship(back_populates="messages")
 
 def get_user(username: str, session) -> Optional[User]:
     statement = select(User).where(User.username == username)
