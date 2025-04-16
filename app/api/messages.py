@@ -2,11 +2,13 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
+from starlette.concurrency import run_in_threadpool
 
 from app.auth import get_current_active_user
 from app.db.session import get_session
 from app.models.models import Message, Channel, User, utc_now, Membership
 from app.schemas.schemas import MessageCreate, MessageRead, MessageUpdate
+from websockets_manger import manager
 
 # Create an API router for message operations.
 messages_router = APIRouter(
@@ -16,9 +18,9 @@ messages_router = APIRouter(
 )
 
 
-@messages_router.post("/channels/{channel_id}/messages", response_model=MessageRead,
-                      status_code=status.HTTP_201_CREATED)
-def create_message_in_channel(
+# Make the function async
+@messages_router.post("/channels/{channel_id}/messages", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
+async def create_message_in_channel(
         *,
         session: Session = Depends(get_session),
         channel_id: int,
@@ -26,38 +28,34 @@ def create_message_in_channel(
         current_user: User = Depends(get_current_active_user)
 ):
     """
-    Create a new message in a specified channel.
+    Creates a new message in a specific channel and broadcasts it via WebSocket.
 
-    This endpoint creates a message provided by the client within a channel.
-    It first validates that:
-      - The channel exists.
-      - The current user is a member of the channel.
-
-    The endpoint then sets the author automatically using the current user's ID
-    and populates the channel ID from the endpoint path. The new message is then
-    added to the database and returned with a 201 status code.
+    - Requires the user making the request (`current_user`) to be a member
+      of the specified channel.
+    - The author of the message is automatically set to the `current_user`.
     """
-    # Validate that the channel exists.
-    db_channel = session.get(Channel, channel_id)
+    # --- Run synchronous DB/Auth checks in threadpool ---
+    db_channel = await run_in_threadpool(session.get, Channel, channel_id)
     if not db_channel:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
 
-    # Check if the current user is a member of the channel.
-    membership_check = session.exec(
-        select(Membership).where(
-            Membership.user_id == current_user.id,
-            Membership.channel_id == channel_id
-        )
-    ).first()
-    if not membership_check:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to post messages in this channel."
-        )
+    membership_check = await run_in_threadpool(
+        session.exec(
+            select(Membership).where(
+                Membership.user_id == current_user.id,
+                Membership.channel_id == channel_id
+            )
+        ).first
+    )
+    # --- End threadpool execution ---
 
-    # Create and validate the message instance, setting:
-    # - channel_id from the endpoint.
-    # - author_id from the current user.
+    if not membership_check:
+         raise HTTPException(
+             status_code=status.HTTP_403_FORBIDDEN,
+             detail="Not authorized to post messages in this channel."
+         )
+
+    # Create the message instance (this part is usually quick)
     db_message = Message.model_validate(
         message_in,
         update={
@@ -66,11 +64,21 @@ def create_message_in_channel(
         }
     )
 
-    # Save the new message to the database.
-    session.add(db_message)
-    session.commit()
-    session.refresh(db_message)
-    return db_message
+    # --- Run synchronous DB operations in threadpool ---
+    def sync_db_operations():
+        session.add(db_message)
+        session.commit()
+        session.refresh(db_message)
+        return db_message
+
+    refreshed_message = await run_in_threadpool(sync_db_operations)
+    # --- Broadcast via WebSocket ---
+    message_read = MessageRead.model_validate(refreshed_message)
+    # Convert to dict suitable for JSON broadcasting
+    message_data = message_read.model_dump(mode='json') # Use mode='json' for datetime serialization
+    await manager.broadcast(channel_id, message_data)
+    return refreshed_message
+
 
 
 @messages_router.get("/{message_id}", response_model=MessageRead)

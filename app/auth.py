@@ -2,16 +2,19 @@ from datetime import timedelta, datetime, timezone
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException,status
+from fastapi import Depends, HTTPException, status, Query, WebSocketException
 from fastapi.security import OAuth2PasswordBearer
-from jwt import InvalidTokenError
+from jwt import InvalidTokenError, ExpiredSignatureError, PyJWTError
 from passlib.context import CryptContext
-from sqlmodel import Session
+from sqlmodel import Session, select
+from starlette.concurrency import run_in_threadpool
+from starlette import status as ws_status
 
 from app.config import settings
 from app.db.session import get_session
 from app.models.models import get_user, User
 from app.schemas.token import TokenData
+from models_enums.enums import UserStatus
 
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
@@ -91,3 +94,50 @@ async def get_current_user(
 
 async def get_current_active_user(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+# --- NEW FUNCTION for WebSocket Auth  ---
+async def get_current_user_from_query(
+    token: str = Query(..., description="WebSocket authentication token"),
+    session: Session = Depends(get_session) # Still using sync session via Depends
+) -> User:
+    """
+    Dependency to authenticate a user based on a JWT token passed as a query parameter using PyJWT.
+    Handles synchronous database calls using run_in_threadpool.
+    """
+    credentials_exception = WebSocketException(
+        code=ws_status.WS_1008_POLICY_VIOLATION,
+        reason="Could not validate credentials",
+    )
+    token_expired_exception = WebSocketException(
+        code=ws_status.WS_1008_POLICY_VIOLATION,
+        reason="Token has expired",
+    )
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str | None = payload.get("sub")
+        if username is None:
+            print("Token payload missing 'sub' (username)")
+            raise credentials_exception
+    except ExpiredSignatureError:
+        print("Token validation failed: ExpiredSignatureError")
+        raise token_expired_exception # Raise specific exception for expired token
+    except PyJWTError as e: # Catch other PyJWT errors (InvalidTokenError, DecodeError, etc.)
+        print(f"Token validation failed: {e}")
+        raise credentials_exception # Raise generic credentials exception
+
+    # --- Run synchronous DB lookup in threadpool ---
+    def get_user_sync(uname: str):
+        return session.exec(select(User).where(User.username == uname)).first()
+
+    # Await the result from the threadpool
+    user = await run_in_threadpool(get_user_sync, username)
+    # --- End threadpool execution ---
+
+    if user is None:
+        print(f"User '{username}' not found in database")
+        raise credentials_exception
+
+    print(f"Successfully authenticated user '{username}' for WebSocket")
+    return user
