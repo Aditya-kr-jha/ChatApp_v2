@@ -1,73 +1,91 @@
 import asyncio
-from typing import Dict, List, Any
-from fastapi import WebSocket, status
-from starlette.websockets import WebSocketState
 import json
+import logging # Use logging module
+from typing import Dict, List, Any
+
+from fastapi import WebSocket, status
+from starlette.websockets import WebSocketState, WebSocketDisconnect # Ensure import
+
+logger = logging.getLogger(__name__) # Create a logger instance
 
 class ConnectionManager:
     def __init__(self):
-        # Dictionary to hold active connections: {channel_id: [websockets]}
-        self.active_connections: Dict[int, List[WebSocket]] = {}
+        self.active_connections: Dict[int, List[WebSocket]] = {} # {channel_id: [websockets]}
+        logger.info("ConnectionManager initialized.")
 
     async def connect(self, channel_id: int, websocket: WebSocket):
-        """Accepts a new websocket connection and adds it to the channel's list."""
+        """Accepts a new websocket connection."""
         await websocket.accept()
         if channel_id not in self.active_connections:
             self.active_connections[channel_id] = []
         self.active_connections[channel_id].append(websocket)
-        print(f"WebSocket connected. Channel {channel_id} has {len(self.active_connections[channel_id])} connections.")
+        logger.info(f"WS connected: {websocket.client} to channel {channel_id}. Total connections in channel: {len(self.active_connections[channel_id])}")
 
     def disconnect(self, channel_id: int, websocket: WebSocket):
-        """Removes a websocket connection from the channel's list."""
+        """Removes a websocket connection."""
         if channel_id in self.active_connections:
             try:
                 self.active_connections[channel_id].remove(websocket)
-                print(f"WebSocket disconnected. Channel {channel_id} has {len(self.active_connections[channel_id])} connections remaining.")
-                # Clean up empty channel lists
+                remaining = len(self.active_connections[channel_id])
+                logger.info(f"WS disconnected: {websocket.client} from channel {channel_id}. Remaining connections: {remaining}")
                 if not self.active_connections[channel_id]:
                     del self.active_connections[channel_id]
-                    print(f"Channel {channel_id} has no active connections, removing from manager.")
+                    logger.info(f"Channel {channel_id} has no active connections, removing from manager.")
             except ValueError:
-                # Handle case where websocket might already be removed
-                print(f"Warning: WebSocket not found in channel {channel_id} list during disconnect.")
+                logger.warning(f"WS disconnect: WebSocket {websocket.client} not found in channel {channel_id} list.")
         else:
-            print(f"Warning: Channel {channel_id} not found in manager during disconnect.")
-
+            logger.warning(f"WS disconnect: Channel {channel_id} not found in manager for client {websocket.client}.")
 
     async def broadcast(self, channel_id: int, message_data: Dict[str, Any]):
-        """Broadcasts a message (as JSON) to all connected clients in a specific channel."""
+        """Broadcasts a message dictionary (as JSON) to all connected clients in a specific channel."""
         if channel_id in self.active_connections:
-            message_json = json.dumps(message_data) # Prepare JSON string once
-            connections = self.active_connections[channel_id]
-            print(f"Broadcasting to {len(connections)} connections in channel {channel_id}: {message_json}")
+            # message_data should be a serializable dict (e.g., from model_dump)
+            try:
+                message_json = json.dumps(message_data) # Prepare JSON string once
+            except TypeError as e:
+                logger.error(f"Failed to serialize message data for broadcast in channel {channel_id}: {e} - Data: {message_data}", exc_info=True)
+                return # Don't broadcast unserializable data
 
-            # Use asyncio.gather for concurrent sending
+            connections = list(self.active_connections[channel_id]) # Copy list for safe iteration
+            if not connections:
+                logger.info(f"No active connections in channel {channel_id} to broadcast to.")
+                return
+
+            logger.debug(f"Broadcasting to {len(connections)} connections in channel {channel_id}: {message_json}")
+
             results = await asyncio.gather(
-                *(self._send_personal_message_json(websocket, message_json) for websocket in connections),
-                return_exceptions=True # Capture exceptions instead of stopping the broadcast
+                *(self._send_personal_message_json(websocket, message_json, channel_id) for websocket in connections),
+                return_exceptions=True # Capture exceptions
             )
 
-            # Optional: Handle exceptions during broadcast (e.g., client disconnected abruptly)
+            # Handle exceptions during broadcast
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    websocket = connections[i]
-                    print(f"Error sending message to websocket {websocket.client}: {result}")
-                    # self.disconnect(channel_id, websocket) # Be careful
+                    websocket = connections[i] # Get corresponding websocket
+                    # Check if websocket is still in the list (might have disconnected concurrently)
+                    if channel_id in self.active_connections and websocket in self.active_connections[channel_id]:
+                        logger.error(f"Error sending message to WS {websocket.client} in channel {channel_id}: {result}. Disconnecting.")
+                        self.disconnect(channel_id, websocket) # Remove from active list first
+                        try:
+                            if websocket.client_state != WebSocketState.DISCONNECTED:
+                                await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                        except RuntimeError as close_error:
 
-    async def _send_personal_message_json(self, websocket: WebSocket, message_json: str):
-        """Helper to send JSON string to a single websocket, handling potential closed states."""
+                            logger.warning(f"Error closing websocket {websocket.client} after send error: {close_error}")
+                    else:
+                         logger.warning(f"Error sending message to WS {websocket.client} in channel {channel_id}, but it already disconnected.")
+
+
+    async def _send_personal_message_json(self, websocket: WebSocket, message_json: str, channel_id: int):
+        """Helper to send JSON string to a single websocket."""
         try:
-            # Check state before sending, though errors can still happen race-condition wise
             if websocket.client_state == WebSocketState.CONNECTED:
                 await websocket.send_text(message_json)
             else:
-                 print(f"WebSocket {websocket.client} is not connected, skipping send.")
+                 logger.warning(f"WebSocket {websocket.client} in channel {channel_id} is not connected, skipping send.")
         except Exception as e:
-             print(f"Failed to send message to {websocket.client}: {e}")
-             # Raise the exception so asyncio.gather can capture it
+             # Log the error here before raising it
+             logger.error(f"Failed to send message to {websocket.client} in channel {channel_id}: {e}", exc_info=False) # exc_info=False to avoid duplicate stack trace from gather
              raise
-
-
-
 
 manager = ConnectionManager()

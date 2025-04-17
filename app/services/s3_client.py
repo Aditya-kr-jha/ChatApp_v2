@@ -105,3 +105,15 @@ class S3Service:
         except Exception as e:
              logger.error(f"Unexpected error generating presigned URL for '{object_key}': {e}", exc_info=True)
              raise HTTPException(status_code=500, detail="An unexpected error occurred generating file access URL.")
+
+
+# --- Dependency Function ---
+# Singleton instance to avoid re-initializing the client constantly
+s3_service_instance = None
+
+def get_s3_service() -> S3Service:
+    global s3_service_instance
+    if s3_service_instance is None:
+        logger.info("Creating S3Service singleton instance.")
+        s3_service_instance = S3Service()
+    return s3_service_instance

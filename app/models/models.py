@@ -80,18 +80,18 @@ class Message(SQLModel, table=True):
     __tablename__ = "messages"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    content: Optional[str] = Field(default=None)
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
     author_id: Optional[int] = Field(default=None, foreign_key="users.id")
     channel_id: Optional[int] = Field(default=None, foreign_key="channels.id")
+    message_type: MessageTypeEnum = Field(default=MessageTypeEnum.TEXT)
+    # Field for text messages
+    content: Optional[str] = Field(default=None)
+    # Fields for file messages (matching MessageRead schema)
+    s3_key: Optional[str] = Field(default=None, index=True) # Store the S3 object key
+    content_type: Optional[str] = Field(default=None)       # Store the MIME type
+    original_filename: Optional[str] = Field(default=None)  # Store the original file name
 
-    # New fields for file messages
-    message_type: MessageTypeEnum = Field(default=MessageTypeEnum.text, index=True)
-    s3_key: Optional[str] = Field(default=None, index=True)
-    content_type: Optional[str] = Field(default=None)
-    original_filename: Optional[str] = Field(default=None)
-
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
     author: Optional["User"] = Relationship(back_populates="messages")
     channel: Optional["Channel"] = Relationship(back_populates="messages")
 

@@ -1,14 +1,25 @@
-from typing import List
+import logging
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlmodel import Session, select
 from starlette.concurrency import run_in_threadpool
 
 from app.auth import get_current_active_user
 from app.db.session import get_session
 from app.models.models import Message, Channel, User, utc_now, Membership
-from app.schemas.schemas import MessageCreate, MessageRead, MessageUpdate
+from app.schemas.schemas import (
+    MessageCreate,
+    MessageRead,
+    MessageUpdate,
+    MessageCreatePayload,
+    FileAccessResponse,
+)
 from app.websockets_manger import manager
+from models_enums.enums import MessageTypeEnum
+from services.s3_client import S3Service, get_s3_service
+
+logger = logging.getLogger(__name__)
 
 # Create an API router for message operations.
 messages_router = APIRouter(
@@ -18,50 +29,165 @@ messages_router = APIRouter(
 )
 
 
-# Make the function async
-@messages_router.post("/channels/{channel_id}/messages", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
-async def create_message_in_channel(
-        *,
-        session: Session = Depends(get_session),
-        channel_id: int,
-        message_in: MessageCreate,
-        current_user: User = Depends(get_current_active_user)
+def get_message_type_from_content(content_type: Optional[str]) -> MessageTypeEnum:
+    if not content_type:
+        return MessageTypeEnum.FILE
+    mime_type = content_type.lower()
+    if mime_type.startswith("image/"):
+        return MessageTypeEnum.IMAGE
+    elif mime_type.startswith("video/"):
+        return MessageTypeEnum.VIDEO
+    elif mime_type.startswith("audio/"):
+        return MessageTypeEnum.AUDIO
+    else:
+        return MessageTypeEnum.FILE
+
+
+# --- Create Text Message Endpoint ---
+@messages_router.post(
+    "/channels/{channel_id}/messages",
+    response_model=MessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_text_message_in_channel(
+    *,
+    session: Session = Depends(get_session),
+    channel_id: int,
+    message_in: MessageCreatePayload,
+    current_user: User = Depends(get_current_active_user),
 ):
     """
-    Creates a new message in a specific channel and broadcasts it via WebSocket.
-
-    - Requires the user making the request (`current_user`) to be a member
-      of the specified channel.
-    - The author of the message is automatically set to the `current_user`.
+    Creates a **text** message in a specific channel and broadcasts it.
     """
-    # --- Run synchronous DB/Auth checks in threadpool ---
+    if message_in.message_type != MessageTypeEnum.TEXT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This endpoint is only for text messages. Use POST /channels/{channel_id}/files for file uploads.",
+        )
+    if not message_in.content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Text messages must include 'content'.",
+        )
+
     db_channel = await run_in_threadpool(session.get, Channel, channel_id)
     if not db_channel:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
+        )
 
     membership_check = await run_in_threadpool(
         session.exec(
             select(Membership).where(
                 Membership.user_id == current_user.id,
-                Membership.channel_id == channel_id
+                Membership.channel_id == channel_id,
             )
         ).first
     )
-    # --- End threadpool execution ---
-
     if not membership_check:
-         raise HTTPException(
-             status_code=status.HTTP_403_FORBIDDEN,
-             detail="Not authorized to post messages in this channel."
-         )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to post messages in this channel.",
+        )
 
-    # Create the message instance (this part is usually quick)
-    db_message = Message.model_validate(
-        message_in,
-        update={
-            "channel_id": channel_id,
-            "author_id": current_user.id
-        }
+    db_message = Message(
+        content=message_in.content,
+        message_type=MessageTypeEnum.TEXT,
+        channel_id=channel_id,
+        author_id=current_user.id,
+    )
+
+    def sync_db_operations():
+        session.add(db_message)
+        session.commit()
+        session.refresh(db_message)
+        session.refresh(db_message, attribute_names=["author"])
+        return db_message
+
+    refreshed_message = await run_in_threadpool(sync_db_operations)
+
+    message_read = MessageRead.model_validate(refreshed_message)
+    message_broadcast_data = message_read.model_dump(mode="json")
+
+    logger.info(
+        f"Broadcasting TEXT message ID {message_read.id} to channel {channel_id}"
+    )
+    await manager.broadcast(channel_id, message_broadcast_data)
+
+    return refreshed_message
+
+
+# --- File Upload and Message Creation Endpoint ---
+@messages_router.post(
+    "/channels/{channel_id}/files",
+    response_model=MessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_file_and_create_message(
+    *,
+    channel_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+    s3_service: S3Service = Depends(get_s3_service),  # Use the provided dependency
+):
+    """
+    Uploads a file to S3, creates a file message record in the database,
+    and broadcasts the message via WebSocket. Uses the injected S3Service.
+    """
+    # --- Authorization and Channel Check ---
+    db_channel = await run_in_threadpool(session.get, Channel, channel_id)
+    if not db_channel:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
+        )
+
+    membership_check = await run_in_threadpool(
+        session.exec(
+            select(Membership).where(
+                Membership.user_id == current_user.id,
+                Membership.channel_id == channel_id,
+            )
+        ).first
+    )
+    if not membership_check:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to upload files to this channel.",
+        )
+
+    # --- Upload file to S3 ---
+    if not file.filename or not file.content_type:
+        logger.warning(
+            f"File upload attempt missing filename or content_type for channel {channel_id}"
+        )
+        raise HTTPException(
+            status_code=400, detail="File is missing filename or content type."
+        )
+
+    try:
+        s3_key = await s3_service.upload_file(
+            file=file, filename=file.filename, content_type=file.content_type
+        )
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(
+            f"Unexpected error calling S3 upload for {file.filename}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="File upload initiation failed.")
+
+    # --- Create Message Record in DB ---
+    message_type = get_message_type_from_content(file.content_type)
+
+    db_message = Message(
+        message_type=message_type,
+        s3_key=s3_key,
+        original_filename=file.filename,
+        content_type=file.content_type,
+        channel_id=channel_id,
+        author_id=current_user.id,
     )
 
     # --- Run synchronous DB operations in threadpool ---
@@ -69,27 +195,99 @@ async def create_message_in_channel(
         session.add(db_message)
         session.commit()
         session.refresh(db_message)
+        session.refresh(db_message, attribute_names=["author"])
         return db_message
 
-    refreshed_message = await run_in_threadpool(sync_db_operations)
+    try:
+        refreshed_message = await run_in_threadpool(sync_db_operations)
+    except Exception as e:
+        logger.error(
+            f"Database error after S3 upload for key {s3_key}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=500, detail="Failed to save message after file upload."
+        )
+
     # --- Broadcast via WebSocket ---
     message_read = MessageRead.model_validate(refreshed_message)
-    # Convert to dict suitable for JSON broadcasting
-    message_data = message_read.model_dump(mode='json') # Use mode='json' for datetime serialization
-    # --- ADD THIS LOG ---
-    print(f"DEBUG: Attempting to broadcast to channel {channel_id}. Message data: {message_data}")
-    print(f"DEBUG: Current connections in manager: {manager.active_connections}")  # Check manager state
-    await manager.broadcast(channel_id, message_data)
+    message_broadcast_data = message_read.model_dump(mode="json")
+
+    logger.info(
+        f"Broadcasting FILE message ID {message_read.id} (key: {s3_key}) to channel {channel_id}"
+    )
+    await manager.broadcast(channel_id, message_broadcast_data)
+
     return refreshed_message
 
+
+# --- Get File Access URL Endpoint (Using S3Service) ---
+@messages_router.get("/{message_id}/access-url", response_model=FileAccessResponse)
+async def get_file_access_url(
+    *,
+    session: Session = Depends(get_session),
+    message_id: int,
+    current_user: User = Depends(get_current_active_user),
+    s3_service: S3Service = Depends(get_s3_service),  # Use the provided dependency
+):
+    """
+    Generates a pre-signed GET URL to access a file associated with a message.
+    Uses the injected S3Service.
+    """
+    # Fetch the message
+    db_message = await run_in_threadpool(session.get, Message, message_id)
+    if not db_message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+        )
+    if db_message.message_type == MessageTypeEnum.TEXT or not db_message.s3_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message does not have an associated file.",
+        )
+
+    # Authorization check
+    if not db_message.channel_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Message channel information missing.",
+        )
+    membership_check = await run_in_threadpool(
+        session.exec(
+            select(Membership).where(
+                Membership.user_id == current_user.id,
+                Membership.channel_id == db_message.channel_id,
+            )
+        ).first
+    )
+    if not membership_check:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access files in this channel.",
+        )
+
+    try:
+        access_url = await run_in_threadpool(
+            s3_service.get_presigned_url, db_message.s3_key
+        )
+        return FileAccessResponse(access_url=access_url)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(
+            f"Unexpected error calling S3 get_presigned_url for {db_message.s3_key}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500, detail="Failed to generate file access URL."
+        )
 
 
 @messages_router.get("/{message_id}", response_model=MessageRead)
 def read_message(
-        *,
-        session: Session = Depends(get_session),
-        message_id: int,
-        current_user: User = Depends(get_current_active_user)
+    *,
+    session: Session = Depends(get_session),
+    message_id: int,
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Retrieve a message by its unique identifier.
@@ -99,17 +297,19 @@ def read_message(
     """
     db_message = session.get(Message, message_id)
     if not db_message:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+        )
     return db_message
 
 
 @messages_router.patch("/{message_id}", response_model=MessageRead)
 def update_message(
-        *,
-        session: Session = Depends(get_session),
-        message_id: int,
-        message_in: MessageUpdate,
-        current_user: User = Depends(get_current_active_user)
+    *,
+    session: Session = Depends(get_session),
+    message_id: int,
+    message_in: MessageUpdate,
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Update an existing message.
@@ -124,11 +324,16 @@ def update_message(
     """
     db_message = session.get(Message, message_id)
     if not db_message:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+        )
 
     # Ensure the current user is the author of the message.
     if db_message.author_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to update this message")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to update this message",
+        )
 
     # Perform a partial update only on provided fields.
     message_data = message_in.model_dump(exclude_unset=True)
@@ -145,10 +350,10 @@ def update_message(
 
 @messages_router.delete("/{message_id}", status_code=status.HTTP_200_OK)
 def delete_message(
-        *,
-        session: Session = Depends(get_session),
-        message_id: int,
-        current_user: User = Depends(get_current_active_user)
+    *,
+    session: Session = Depends(get_session),
+    message_id: int,
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Delete a message by its unique identifier.
@@ -159,11 +364,16 @@ def delete_message(
     """
     db_message = session.get(Message, message_id)
     if not db_message:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+        )
 
     # Check authorization: the current user must own the message.
     if db_message.author_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this message")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to delete this message",
+        )
 
     # Delete the message from the database.
     session.delete(db_message)
@@ -173,12 +383,12 @@ def delete_message(
 
 @messages_router.get("/user/{user_id}", response_model=List[MessageRead])
 def read_all_messages_of_user(
-        *,
-        session: Session = Depends(get_session),
-        user_id: int,  # The author whose messages are being queried.
-        skip: int = 0,
-        limit: int = 100,
-        current_user: User = Depends(get_current_active_user)
+    *,
+    session: Session = Depends(get_session),
+    user_id: int,  # The author whose messages are being queried.
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Retrieve messages posted by a specific user.
@@ -192,9 +402,15 @@ def read_all_messages_of_user(
     statement = (
         select(Message)
         .join(Membership, Message.channel_id == Membership.channel_id)
-        .where(Message.author_id == user_id)  # Ensure messages are from the desired author.
-        .where(Membership.user_id == current_user.id)  # Confirm current user is a member of the channel.
-        .order_by(Message.created_at.asc())  # Order messages by creation date ascending (oldest first).
+        .where(
+            Message.author_id == user_id
+        )  # Ensure messages are from the desired author.
+        .where(
+            Membership.user_id == current_user.id
+        )  # Confirm current user is a member of the channel.
+        .order_by(
+            Message.created_at.asc()
+        )  # Order messages by creation date ascending (oldest first).
         .offset(skip)  # Support pagination by skipping records.
         .limit(limit)  # Limit the number of records returned.
     )
@@ -202,15 +418,17 @@ def read_all_messages_of_user(
     return messages
 
 
-@messages_router.get("/channel/{channel_id}/user/{user_id}", response_model=List[MessageRead])
+@messages_router.get(
+    "/channel/{channel_id}/user/{user_id}", response_model=List[MessageRead]
+)
 def read_all_messages_of_user_in_channel(
-        *,
-        session: Session = Depends(get_session),
-        channel_id: int,  # The channel to filter messages.
-        user_id: int,  # The author whose messages are queried.
-        skip: int = 0,
-        limit: int = 100,
-        current_user: User = Depends(get_current_active_user)
+    *,
+    session: Session = Depends(get_session),
+    channel_id: int,  # The channel to filter messages.
+    user_id: int,  # The author whose messages are queried.
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Retrieve messages by a specific user within a given channel.
@@ -222,14 +440,13 @@ def read_all_messages_of_user_in_channel(
     # Verify that the current user is a member of the channel.
     membership_check = session.exec(
         select(Membership).where(
-            Membership.user_id == current_user.id,
-            Membership.channel_id == channel_id
+            Membership.user_id == current_user.id, Membership.channel_id == channel_id
         )
     ).first()
     if not membership_check:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to view messages in this channel."
+            detail="Not authorized to view messages in this channel.",
         )
 
     # Retrieve messages in the channel from the specified author.
@@ -247,12 +464,12 @@ def read_all_messages_of_user_in_channel(
 
 @messages_router.get("/channel/{channel_id}", response_model=List[MessageRead])
 def read_messages_in_channel(
-        *,
-        session: Session = Depends(get_session),
-        channel_id: int,  # The channel from which to retrieve messages.
-        skip: int = 0,
-        limit: int = 100,
-        current_user: User = Depends(get_current_active_user)
+    *,
+    session: Session = Depends(get_session),
+    channel_id: int,  # The channel from which to retrieve messages.
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Retrieve all messages in a specific channel.
@@ -265,14 +482,13 @@ def read_messages_in_channel(
     # Authorization Check: Verify current user membership.
     membership_check = session.exec(
         select(Membership).where(
-            Membership.user_id == current_user.id,
-            Membership.channel_id == channel_id
+            Membership.user_id == current_user.id, Membership.channel_id == channel_id
         )
     ).first()
     if not membership_check:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to view messages in this channel."
+            detail="Not authorized to view messages in this channel.",
         )
 
     # Retrieve messages for the channel with pagination.
@@ -287,12 +503,14 @@ def read_messages_in_channel(
     return messages
 
 
-@messages_router.delete("/channel/{channel_id}/messages", status_code=status.HTTP_200_OK)
+@messages_router.delete(
+    "/channel/{channel_id}/messages", status_code=status.HTTP_200_OK
+)
 def delete_all_channel_messages(
-        *,
-        session: Session = Depends(get_session),
-        channel_id: int,
-        current_user: User = Depends(get_current_active_user)
+    *,
+    session: Session = Depends(get_session),
+    channel_id: int,
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Delete all messages in a specific channel.
@@ -303,13 +521,15 @@ def delete_all_channel_messages(
     # Verify the channel exists
     db_channel = session.get(Channel, channel_id)
     if not db_channel:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
+        )
 
     # Verify the current user is the channel owner
     if db_channel.owner_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only channel owner can delete all messages"
+            detail="Only channel owner can delete all messages",
         )
 
     # Get all messages to delete
