@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 from app.auth import get_current_active_user
 from app.db.session import get_session
 from app.models.models import Channel, utc_now, User, Membership
-from app.schemas.schemas import ChannelCreate, ChannelRead, ChannelUpdate, UserRead
+from app.schemas.schemas import ChannelCreate, ChannelRead, ChannelUpdate, UserRead, ChannelOwner
 
 # Define a router for channel-related operations.
 channel_router = APIRouter(
@@ -15,7 +15,62 @@ channel_router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+@channel_router.get("/my-memberships", response_model=List[ChannelRead])
+def read_my_channels(
+        *,
+        session: Session = Depends(get_session),
+        skip: int = 0,
+        limit: int = 100,
+        current_user: User = Depends(get_current_active_user)
+):
+    """
+    Retrieve channels the current user belongs to.
 
+    Returns a paginated list of channels, ordered alphabetically by channel name.
+    """
+    statement = (
+        select(Channel)
+        .join(Membership, Channel.id == Membership.channel_id)
+        .where(Membership.user_id == current_user.id)
+        .order_by(Channel.name)
+        .offset(skip)
+        .limit(limit)
+    )
+    channels = session.exec(statement).all()
+    return channels
+
+@channel_router.get("/owners", response_model=List[ChannelOwner])
+def list_channel_owners(
+    *,
+    session: Session = Depends(get_session),
+    skip: int = 0,
+    limit: int = 100,
+    current_user=Depends(get_current_active_user)
+):
+    """
+    Retrieve a paginated list of channels with their owner information using a join query.
+    """
+    # Use a join query to get both Channel and User data in one round trip.
+    statement = (
+        select(Channel, User)
+        .join(User, Channel.owner_id == User.id)
+        .order_by(Channel.name)
+        .offset(skip)
+        .limit(limit)
+    )
+    results = session.exec(statement).all()
+
+    response = []
+    for channel, owner in results:
+        response.append(
+            ChannelOwner(
+                channel_id=channel.id,
+                channel_name=channel.name,
+                owner_id=owner.id,
+                owner_name=owner.username
+            )
+        )
+    return response
 @channel_router.post("/", response_model=ChannelRead, status_code=status.HTTP_201_CREATED)
 def create_channel(
         *,
@@ -352,26 +407,3 @@ def read_channel_members(
     return members
 
 
-@channel_router.get("/my-memberships", response_model=List[ChannelRead])
-def read_my_channels(
-        *,
-        session: Session = Depends(get_session),
-        skip: int = 0,
-        limit: int = 100,
-        current_user: User = Depends(get_current_active_user)
-):
-    """
-    Retrieve channels the current user belongs to.
-
-    Returns a paginated list of channels, ordered alphabetically by channel name.
-    """
-    statement = (
-        select(Channel)
-        .join(Membership, Channel.id == Membership.channel_id)
-        .where(Membership.user_id == current_user.id)
-        .order_by(Channel.name)
-        .offset(skip)
-        .limit(limit)
-    )
-    channels = session.exec(statement).all()
-    return channels

@@ -2,7 +2,8 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from sqlmodel import Field, SQLModel, Relationship, select
 
-from models_enums.enums import UserStatus
+from models_enums.enums import UserStatus, MessageTypeEnum
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -30,8 +31,8 @@ class User(SQLModel, table=True):
     username: str = Field(index=True, unique=True)
     email: str = Field(index=True, unique=True)
     hashed_password: str
-    first_name: str
-    last_name: str
+    first_name: str=None
+    last_name: str=None
     bio: Optional[str] = None
     profile_picture: Optional[str] = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -79,11 +80,17 @@ class Message(SQLModel, table=True):
     __tablename__ = "messages"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    content: str
+    content: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     author_id: Optional[int] = Field(default=None, foreign_key="users.id")
     channel_id: Optional[int] = Field(default=None, foreign_key="channels.id")
+
+    # New fields for file messages
+    message_type: MessageTypeEnum = Field(default=MessageTypeEnum.text, index=True)
+    s3_key: Optional[str] = Field(default=None, index=True)
+    content_type: Optional[str] = Field(default=None)
+    original_filename: Optional[str] = Field(default=None)
 
     author: Optional["User"] = Relationship(back_populates="messages")
     channel: Optional["Channel"] = Relationship(back_populates="messages")

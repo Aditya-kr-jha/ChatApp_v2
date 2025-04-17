@@ -8,6 +8,7 @@ from sqlmodel import select, Session
 from starlette.concurrency import run_in_threadpool
 
 from starlette import status as ws_status
+from starlette.middleware.cors import CORSMiddleware
 
 from app.api.channels import channel_router
 from app.api.messages import messages_router
@@ -31,9 +32,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, title="Chat Application", version="0.1.2")
 
 # Include Routers
-app.include_router(user_router, prefix="/users", tags=["users"]) # Add prefix/tags
-app.include_router(channel_router, prefix="/channels", tags=["channels"])
-app.include_router(messages_router, prefix="/messages", tags=["messages"])
+app.include_router(user_router) # Add prefix/tags
+app.include_router(channel_router )
+app.include_router(messages_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify exact origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 async def root():

@@ -13,6 +13,16 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+@router.get("/me", response_model=UserRead, name="read_current_user")
+def read_current_user(
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Retrieve details for the currently authenticated user.
+    """
+    return current_user
+
+
 @router.post("/", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 def create_user(
     *,

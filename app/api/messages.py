@@ -8,7 +8,7 @@ from app.auth import get_current_active_user
 from app.db.session import get_session
 from app.models.models import Message, Channel, User, utc_now, Membership
 from app.schemas.schemas import MessageCreate, MessageRead, MessageUpdate
-from websockets_manger import manager
+from app.websockets_manger import manager
 
 # Create an API router for message operations.
 messages_router = APIRouter(
@@ -76,6 +76,9 @@ async def create_message_in_channel(
     message_read = MessageRead.model_validate(refreshed_message)
     # Convert to dict suitable for JSON broadcasting
     message_data = message_read.model_dump(mode='json') # Use mode='json' for datetime serialization
+    # --- ADD THIS LOG ---
+    print(f"DEBUG: Attempting to broadcast to channel {channel_id}. Message data: {message_data}")
+    print(f"DEBUG: Current connections in manager: {manager.active_connections}")  # Check manager state
     await manager.broadcast(channel_id, message_data)
     return refreshed_message
 
@@ -191,7 +194,7 @@ def read_all_messages_of_user(
         .join(Membership, Message.channel_id == Membership.channel_id)
         .where(Message.author_id == user_id)  # Ensure messages are from the desired author.
         .where(Membership.user_id == current_user.id)  # Confirm current user is a member of the channel.
-        .order_by(Message.created_at.desc())  # Order messages by creation date descending.
+        .order_by(Message.created_at.asc())  # Order messages by creation date ascending (oldest first).
         .offset(skip)  # Support pagination by skipping records.
         .limit(limit)  # Limit the number of records returned.
     )
@@ -234,7 +237,7 @@ def read_all_messages_of_user_in_channel(
         select(Message)
         .where(Message.author_id == user_id)
         .where(Message.channel_id == channel_id)
-        .order_by(Message.created_at.desc())
+        .order_by(Message.created_at.asc())
         .offset(skip)
         .limit(limit)
     )
@@ -276,9 +279,48 @@ def read_messages_in_channel(
     statement = (
         select(Message)
         .where(Message.channel_id == channel_id)
-        .order_by(Message.created_at.desc())
+        .order_by(Message.created_at.asc())
         .offset(skip)
         .limit(limit)
     )
     messages = session.exec(statement).all()
     return messages
+
+
+@messages_router.delete("/channel/{channel_id}/messages", status_code=status.HTTP_200_OK)
+def delete_all_channel_messages(
+        *,
+        session: Session = Depends(get_session),
+        channel_id: int,
+        current_user: User = Depends(get_current_active_user)
+):
+    """
+    Delete all messages in a specific channel.
+
+    Only the channel owner can delete all messages in the channel.
+    Returns the count of deleted messages.
+    """
+    # Verify the channel exists
+    db_channel = session.get(Channel, channel_id)
+    if not db_channel:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
+
+    # Verify the current user is the channel owner
+    if db_channel.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only channel owner can delete all messages"
+        )
+
+    # Get all messages to delete
+    statement = select(Message).where(Message.channel_id == channel_id)
+    messages = session.exec(statement).all()
+    count = len(messages)
+
+    # Delete all messages
+    for message in messages:
+        session.delete(message)
+
+    session.commit()
+
+    return {"message": f"{count} messages deleted successfully from channel"}

@@ -1,7 +1,7 @@
 from pydantic_settings import BaseSettings
 
+
 class Settings(BaseSettings):
-    # Database settings
     DATABASE_URL: str = "sqlite:///./blog.db"
 
     # Authentication
@@ -10,9 +10,14 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 300
 
     # Application settings
-
     ECHO: bool = True
     RELOAD: bool = True
+
+    # AWS settings
+    AWS_ACCESS_KEY_ID: str="fere"
+    AWS_SECRET_ACCESS_KEY: str="efere"
+    AWS_DEFAULT_REGION: str="erer"
+    S3_BUCKET_NAME: str="erere"
 
     class Config:
         env_file = ".env"
@@ -20,5 +25,5 @@ class Settings(BaseSettings):
         case_sensitive = True
 
 
-# Create settings instance
+
 settings = Settings()
