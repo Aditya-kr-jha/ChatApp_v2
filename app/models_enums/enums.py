@@ -6,5 +6,8 @@ class UserStatus(str, Enum):
     deleted = "deleted"
 
 class MessageTypeEnum(str, Enum):
-    text = "text"
-    file = "file"
+    TEXT = "text"
+    IMAGE = "image"
+    VIDEO = "video"
+    AUDIO = "audio"
+    FILE = "file"
