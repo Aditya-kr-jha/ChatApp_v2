@@ -12,8 +12,6 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-
-
 AWS_ACCESS_KEY_ID=settings.AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY=settings.AWS_SECRET_ACCESS_KEY
 AWS_REGION=settings.AWS_DEFAULT_REGION
