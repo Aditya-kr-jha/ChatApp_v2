@@ -33,8 +33,8 @@ class User(SQLModel, table=True):
     username: str = Field(index=True, unique=True)
     email: str = Field(index=True, unique=True)
     hashed_password: str
-    first_name: str = None
-    last_name: str = None
+    first_name: Optional[str] = Field(default=None, nullable=True)
+    last_name: Optional[str] = Field(default=None, nullable=True)
     bio: Optional[str] = None
     profile_picture: Optional[str] = None
     created_at: datetime = Field(default_factory=utc_now)
