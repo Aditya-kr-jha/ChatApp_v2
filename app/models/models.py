@@ -2,11 +2,12 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from sqlmodel import Field, SQLModel, Relationship, select
 
-from models_enums.enums import UserStatus, MessageTypeEnum
+from app.models_enums.enums import UserStatus, MessageTypeEnum
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
 
 class Membership(SQLModel, table=True):
     __tablename__ = "memberships"
@@ -17,12 +18,13 @@ class Membership(SQLModel, table=True):
 
     user: "User" = Relationship(
         back_populates="memberships",
-        sa_relationship_kwargs={"overlaps": "channels,members"}
+        sa_relationship_kwargs={"overlaps": "channels,members"},
     )
     channel: "Channel" = Relationship(
         back_populates="memberships",
-        sa_relationship_kwargs={"overlaps": "members,channels"}
+        sa_relationship_kwargs={"overlaps": "members,channels"},
     )
+
 
 class User(SQLModel, table=True):
     __tablename__ = "users"
@@ -31,8 +33,8 @@ class User(SQLModel, table=True):
     username: str = Field(index=True, unique=True)
     email: str = Field(index=True, unique=True)
     hashed_password: str
-    first_name: str=None
-    last_name: str=None
+    first_name: str = None
+    last_name: str = None
     bio: Optional[str] = None
     profile_picture: Optional[str] = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -47,9 +49,10 @@ class User(SQLModel, table=True):
         link_model=Membership,
         sa_relationship_kwargs={
             "secondary": "memberships",
-            "overlaps": "memberships,user"
-        }
+            "overlaps": "memberships,user",
+        },
     )
+
 
 class Channel(SQLModel, table=True):
     __tablename__ = "channels"
@@ -64,17 +67,17 @@ class Channel(SQLModel, table=True):
     owner: Optional["User"] = Relationship(back_populates="owned_channels")
     messages: List["Message"] = Relationship(back_populates="channel")
     memberships: List["Membership"] = Relationship(
-        back_populates="channel",
-        sa_relationship_kwargs={"overlaps": "channels"}
+        back_populates="channel", sa_relationship_kwargs={"overlaps": "channels"}
     )
     members: List["User"] = Relationship(
         back_populates="channels",
         link_model=Membership,
         sa_relationship_kwargs={
             "secondary": "memberships",
-            "overlaps": "channel,memberships,user"
-        }
+            "overlaps": "channel,memberships,user",
+        },
     )
+
 
 class Message(SQLModel, table=True):
     __tablename__ = "messages"
@@ -86,14 +89,17 @@ class Message(SQLModel, table=True):
     # Field for text messages
     content: Optional[str] = Field(default=None)
     # Fields for file messages (matching MessageRead schema)
-    s3_key: Optional[str] = Field(default=None, index=True) # Store the S3 object key
-    content_type: Optional[str] = Field(default=None)       # Store the MIME type
-    original_filename: Optional[str] = Field(default=None)  # Store the original file name
+    s3_key: Optional[str] = Field(default=None, index=True)  # Store the S3 object key
+    content_type: Optional[str] = Field(default=None)  # Store the MIME type
+    original_filename: Optional[str] = Field(
+        default=None
+    )  # Store the original file name
 
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     author: Optional["User"] = Relationship(back_populates="messages")
     channel: Optional["Channel"] = Relationship(back_populates="messages")
+
 
 def get_user(username: str, session) -> Optional[User]:
     statement = select(User).where(User.username == username)

@@ -14,7 +14,7 @@ from app.config import settings
 from app.db.session import get_session
 from app.models.models import get_user, User
 from app.schemas.token import TokenData
-from models_enums.enums import UserStatus
+from app.models_enums.enums import UserStatus
 
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
@@ -70,8 +70,8 @@ def create_access_token(data: dict, expires_delta: int | timedelta = None) -> st
 
 
 async def get_current_user(
-        token: Annotated[str, Depends(oauth2_scheme)],
-        session: Session = Depends(get_session),
+    token: Annotated[str, Depends(oauth2_scheme)],
+    session: Session = Depends(get_session),
 ):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -99,7 +99,7 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
 # --- NEW FUNCTION for WebSocket Auth  ---
 async def get_current_user_from_query(
     token: str = Query(..., description="WebSocket authentication token"),
-    session: Session = Depends(get_session) # Still using sync session via Depends
+    session: Session = Depends(get_session),  # Still using sync session via Depends
 ) -> User:
     """
     Dependency to authenticate a user based on a JWT token passed as a query parameter using PyJWT.
@@ -122,10 +122,12 @@ async def get_current_user_from_query(
             raise credentials_exception
     except ExpiredSignatureError:
         print("Token validation failed: ExpiredSignatureError")
-        raise token_expired_exception # Raise specific exception for expired token
-    except PyJWTError as e: # Catch other PyJWT errors (InvalidTokenError, DecodeError, etc.)
+        raise token_expired_exception  # Raise specific exception for expired token
+    except (
+        PyJWTError
+    ) as e:  # Catch other PyJWT errors (InvalidTokenError, DecodeError, etc.)
         print(f"Token validation failed: {e}")
-        raise credentials_exception # Raise generic credentials exception
+        raise credentials_exception  # Raise generic credentials exception
 
     # --- Run synchronous DB lookup in threadpool ---
     def get_user_sync(uname: str):

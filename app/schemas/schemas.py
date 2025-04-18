@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional, Literal, Union, ClassVar
 from pydantic import BaseModel, EmailStr, Field, HttpUrl, model_validator
-from models_enums.enums import UserStatus, MessageTypeEnum
+from app.models_enums.enums import UserStatus, MessageTypeEnum
 
 
 # User Schemas
