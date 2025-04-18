@@ -16,8 +16,8 @@ from app.schemas.schemas import (
     FileAccessResponse,
 )
 from app.websockets_manger import manager
-from models_enums.enums import MessageTypeEnum
-from services.s3_client import S3Service, get_s3_service
+from app.models_enums.enums import MessageTypeEnum
+from app.services.s3_client import S3Service, get_s3_service
 
 logger = logging.getLogger(__name__)
 
