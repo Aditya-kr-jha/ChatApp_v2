@@ -51,7 +51,7 @@ app.include_router(messages_router)
 allowed_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://dg9qzy1dkyjl5.cloudfront.net",
+    "https://dlp2zfvdxkrys.cloudfront.net",
 ]
 
 app.add_middleware(

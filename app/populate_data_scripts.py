@@ -3,7 +3,7 @@ import json
 import time
 
 # --- Configuration ---
-BASE_URL = "http://0.0.0.0:8000/"  # Adjust if your app runs elsewhere
+BASE_URL = "https://chatapp-v2-zhgh.onrender.com"  # Adjust if your app runs elsewhere
 TOKEN_URL = f"{BASE_URL}/token"
 USERS_URL = f"{BASE_URL}/users/"
 CHANNELS_URL = f"{BASE_URL}/channels/"
